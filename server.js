@@ -11,3 +11,6 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
   console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT} (${HOST})`);
 });
+
+// Export for serverless platforms (e.g., Vercel)
+module.exports = app;

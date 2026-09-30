@@ -27,7 +27,12 @@ const app = express();
 
 // Security Middlewares
 app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+}));
 
 // Data sanitization against NoSQL query injection
 app.use(mongoSanitize());

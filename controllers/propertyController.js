@@ -1,26 +1,29 @@
 const Property = require('../models/Property');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const cloudinary = require('../utils/cloudinary');
 const { createNotification } = require('../utils/notifyHelper');
+const { getCache, setCache, deleteCache, deleteCachePattern } = require('../utils/redisClient');
 
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
-
-// Multer storage config
-const storage = multer.diskStorage({
-  destination(req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename(req, file, cb) {
-    cb(null, `property-${Date.now()}${path.extname(file.originalname)}`);
+// Use memory storage — works on Vercel (serverless) and avoids disk writes
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Keliya sawirro ayaa la oggol yahay (Only images allowed)'), false);
   }
 });
-const upload = multer({ storage });
+
+// Upload buffer directly to Cloudinary (no disk)
+const uploadBufferToCloudinary = (buffer, folder = 'realestate/properties') => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: 'image' },
+      (error, result) => { if (error) reject(error); else resolve(result.secure_url); }
+    );
+    stream.end(buffer);
+  });
+};
 
 
 // @desc    Get properties (with map & filters)
@@ -29,6 +32,13 @@ const upload = multer({ storage });
 exports.getProperties = async (req, res, next) => {
   try {
     const { lat, lng, distance, minPrice, maxPrice, propertyType, category, listingType, hasWifi, hasBalcony, hasAC, hasParking, bedrooms, bathrooms } = req.query;
+
+    // Build a unique cache key from query params
+    const cacheKey = `properties:${JSON.stringify(req.query)}`;
+    const cached = await getCache(cacheKey);
+    if (cached) {
+      return res.status(200).json({ success: true, count: cached.length, data: cached, fromCache: true });
+    }
 
     let query = {};
 
@@ -84,6 +94,9 @@ exports.getProperties = async (req, res, next) => {
       .populate('assigned_agency_id', 'name phone email avatar role')
       .populate('assigned_worker_id', 'name phone email avatar role');
 
+    // Cache for 5 minutes (300 seconds)
+    await setCache(cacheKey, properties, 300);
+
     res.status(200).json({ success: true, count: properties.length, data: properties });
   } catch (err) {
     next(err);
@@ -95,6 +108,12 @@ exports.getProperties = async (req, res, next) => {
 // @access  Public
 exports.getProperty = async (req, res, next) => {
   try {
+    const cacheKey = `property:${req.params.id}`;
+    const cached = await getCache(cacheKey);
+    if (cached) {
+      return res.status(200).json({ success: true, data: cached, fromCache: true });
+    }
+
     const property = await Property.findById(req.params.id)
       .populate('owner', 'name phone email avatar role')
       .populate('agencyOwner', 'name phone email avatar role')
@@ -103,6 +122,10 @@ exports.getProperty = async (req, res, next) => {
     if (!property) {
       return res.status(404).json({ success: false, message: 'Property not found' });
     }
+
+    // Cache single property for 10 minutes
+    await setCache(cacheKey, property, 600);
+
     res.status(200).json({ success: true, data: property });
   } catch (err) {
     next(err);
@@ -131,6 +154,9 @@ exports.createProperty = async (req, res, next) => {
     }
 
     const property = await Property.create(req.body);
+
+    // Clear all property list caches so new property appears immediately
+    await deleteCachePattern('properties:*');
 
     // Notify submitting user
     await createNotification({
@@ -189,6 +215,11 @@ exports.updateProperty = async (req, res, next) => {
       new: true,
       runValidators: true
     });
+
+    // Clear cache for this property and all list caches
+    await deleteCache(`property:${req.params.id}`);
+    await deleteCachePattern('properties:*');
+
     res.status(200).json({ success: true, data: property });
   } catch (err) {
     next(err);
@@ -212,17 +243,22 @@ exports.deleteProperty = async (req, res, next) => {
       return res.status(403).json({ success: false, message: 'Not authorized to delete this property' });
     }
     await property.deleteOne();
+
+    // Clear cache for this property and all list caches
+    await deleteCache(`property:${req.params.id}`);
+    await deleteCachePattern('properties:*');
+
     res.status(200).json({ success: true, data: {} });
   } catch (err) {
     next(err);
   }
 };
 
-// @desc    Upload property images (Supports Cloudinary with Local Fallback)
+// @desc    Upload property images to Cloudinary
 // @route   POST /api/properties/upload
 // @access  Private
 exports.uploadPropertyImages = (req, res, next) => {
-  const uploader = upload.array('images', 5);
+  const uploader = upload.array('images', 10);
   uploader(req, res, async function (err) {
     if (err) {
       return res.status(400).json({ success: false, message: err.message });
@@ -232,40 +268,17 @@ exports.uploadPropertyImages = (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Fadlan dooro ugu yaraan hal sawir (No files uploaded)' });
     }
 
-    // Check if Cloudinary is configured
-    const isCloudinaryConfigured = process.env.CLOUDINARY_CLOUD_NAME && 
-                                   process.env.CLOUDINARY_API_KEY && 
-                                   process.env.CLOUDINARY_API_SECRET;
-
-    if (isCloudinaryConfigured) {
-      try {
-        const uploadPromises = req.files.map(file => {
-          return cloudinary.uploader.upload(file.path, {
-            folder: 'realestate/properties',
-            resource_type: 'image',
-          }).then(result => {
-            // Remove local temporary file
-            try {
-              if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
-            } catch (unlinkErr) {
-              console.warn('Could not remove temp file:', unlinkErr.message);
-            }
-            return result.secure_url;
-          });
-        });
-
-        const cloudUrls = await Promise.all(uploadPromises);
-        console.log('[Cloudinary] Successfully uploaded images:', cloudUrls);
-        return res.status(200).json({ success: true, data: cloudUrls });
-      } catch (cloudErr) {
-        console.error('[Cloudinary Upload Error, falling back to local]:', cloudErr.message);
-      }
+    try {
+      const uploadPromises = req.files.map(file =>
+        uploadBufferToCloudinary(file.buffer, 'realestate/properties')
+      );
+      const cloudUrls = await Promise.all(uploadPromises);
+      console.log(`[Cloudinary] Uploaded ${cloudUrls.length} property image(s):`, cloudUrls);
+      return res.status(200).json({ success: true, data: cloudUrls });
+    } catch (cloudErr) {
+      console.error('[Cloudinary Upload Error]:', cloudErr.message);
+      return res.status(500).json({ success: false, message: 'Sawirka Cloudinary lama gelin karo: ' + cloudErr.message });
     }
-
-    // Fallback: Local disk storage
-    const localPaths = req.files.map(file => `/uploads/${file.filename}`);
-    console.log('[Upload] Saved images locally:', localPaths);
-    res.status(200).json({ success: true, data: localPaths });
   });
 };
 

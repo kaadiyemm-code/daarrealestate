@@ -1,15 +1,8 @@
 const Worker = require('../models/Worker');
 const Booking = require('../models/Booking');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { createNotification } = require('../utils/notifyHelper');
 
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
 
 const cloudinary = require('../utils/cloudinary');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
@@ -842,29 +835,13 @@ exports.uploadWorkerFiles = (req, res, next) => {
     }
 
     try {
-      const fileUrls = await Promise.all(req.files.map(async (file) => {
-        // If CloudinaryStorage was used, file.path is already the Cloudinary URL
-        if (file.path && file.path.startsWith('http')) {
-          return file.path;
-        }
-        if (file.secure_url) {
-          return file.secure_url;
-        }
-        // If stored temporarily on disk, upload to Cloudinary
-        const uploadResult = await cloudinary.uploader.upload(file.path, {
-          folder: 'realestate/workers',
-          resource_type: file.mimetype === 'application/pdf' ? 'raw' : 'image',
-        });
-        try { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch(e){}
-        return uploadResult.secure_url;
-      }));
-
+      // CloudinaryStorage returns secure_url or path as the Cloudinary URL
+      const fileUrls = req.files.map(file => file.secure_url || file.path);
       console.log('[Worker Upload] Uploaded files to Cloudinary:', fileUrls);
       res.status(200).json({ success: true, data: fileUrls, urls: fileUrls });
     } catch (uploadErr) {
       console.error('[Worker Upload Error]:', uploadErr.message);
-      const fallbackUrls = req.files.map(file => file.path || `/uploads/${file.filename}`);
-      res.status(200).json({ success: true, data: fallbackUrls, urls: fallbackUrls });
+      res.status(500).json({ success: false, message: 'Sawirka lama gelin karo: ' + uploadErr.message });
     }
   });
 };

@@ -64,7 +64,7 @@ router.post(
       const results = await Promise.all(uploadPromises);
       const urls = results.map(r => r.secure_url);
 
-      console.log(`[Cloudinary Upload] Successfully uploaded ${urls.length} file(s) to folder: realestate/${folder}`);
+      console.log(`[Cloudinary Upload] Successfully uploaded ${urls.length} file(s)`);
 
       res.status(200).json({
         success: true,
@@ -83,3 +83,4 @@ router.post(
 );
 
 module.exports = router;
+
